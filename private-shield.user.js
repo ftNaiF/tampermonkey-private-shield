@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         🔒 Tampermonkey Private Shield
 // @namespace    https://github.com/mooh971/tampermonkey-private-shield
-// @version      1.3.2
-// @description  Auto-hide emails and phone numbers on any webpage
+// @version      1.4.0
+// @description  Auto-hide emails, phone numbers, IPs on any webpage during screensharing
 // @author       mooh971
 // @match        *://*/*
 // @grant        GM_addStyle
 // @grant        GM_addElement
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @sandbox      JavaScript
 // @run-at       document-start
@@ -21,7 +24,7 @@
     // -------------------------------------------------------------------------
     // 1. Constants & Global State
     // -------------------------------------------------------------------------
-    const PATTERN = /([^\s,،<>]+@[^\s,،<>]+)|((?<![0-9٠-٩۰-۹.,٫])[0-9٠-٩۰-۹]{1,3}(?:[\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d\s]*\.[\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d\s]*[0-9٠-٩۰-۹]{1,3}){3}(?::[0-9٠-٩۰-۹]{1,5})?(?![0-9٠-٩۰-۹.,٫]))|((?<![0-9٠-٩۰-۹.,٫])(?:(?:\+|00|٠٠|۰۰)[ \u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d]*)?[0-9٠-٩۰-۹](?:[ \t\-.()[\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d]{0,2}[0-9٠-٩۰-۹]){6,14}(?![0-9٠-٩0-9]))/g;
+    const PATTERN = /([^\s,،<>]+@[^\s,،<>]+)|((?<![0-9٠-٩۰-۹.,٫])[0-9٠-٩۰-۹]{1,3}(?:[\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d\s]*\.[\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d\s]*[0-9٠-٩۰-۹]{1,3}){3}(?::[0-9٠-٩۰-۹]{1,5})?(?![0-9٠-٩۰-۹.,٫]))|((?<![0-9٠-٩۰-۹.,٫])(?:(?:\+|00|٠٠|۰۰)[ \u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d]*)?[0-9٠-٩۰-۹](?:[ \t\-.()[\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d]{0,2}[0-9٠-٩۰-۹]){6,14}(?![0-9٠-٩0-9]))|((?:\[?)(?::(?::[0-9a-fA-F]{1,4}){1,7}|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,})(?:%[\w.\-]+)?(?:\])?(?::\d{1,5})?)/g;
 
     const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'HEAD', 'LINK', 'META', 'TEMPLATE', 'IFRAME', 'SVG']);
     const tooltipText = 'Click to reveal 🔒';
@@ -59,6 +62,55 @@
     const processed = new WeakSet();
     const pendingShadowRoots = [];
     let globalObserver = null;
+    let currentSettings = null;
+
+    // -------------------------------------------------------------------------
+    // 1b. Settings (GM_getValue/GM_setValue)
+    // -------------------------------------------------------------------------
+
+    const DEFAULT_SETTINGS = {
+        maskEmails: true,
+        maskPhones: true,
+        maskIPs: true,
+        whitelistedSites: ''
+    };
+
+    function loadSettings() {
+        return {
+            maskEmails: GM_getValue('maskEmails', DEFAULT_SETTINGS.maskEmails),
+            maskPhones: GM_getValue('maskPhones', DEFAULT_SETTINGS.maskPhones),
+            maskIPs: GM_getValue('maskIPs', DEFAULT_SETTINGS.maskIPs),
+            whitelistedSites: GM_getValue('whitelistedSites', DEFAULT_SETTINGS.whitelistedSites)
+        };
+    }
+
+    function getSettings() {
+        if (!currentSettings) currentSettings = loadSettings();
+        return currentSettings;
+    }
+
+    function saveSettings(settings) {
+        currentSettings = settings;
+        GM_setValue('maskEmails', settings.maskEmails);
+        GM_setValue('maskPhones', settings.maskPhones);
+        GM_setValue('maskIPs', settings.maskIPs);
+        GM_setValue('whitelistedSites', settings.whitelistedSites);
+    }
+
+    function isSiteWhitelisted() {
+        const s = getSettings();
+        if (!s.whitelistedSites) return false;
+        const hostname = window.location.hostname.toLowerCase();
+        return s.whitelistedSites.split(',').map(x => x.trim().toLowerCase()).filter(Boolean).some(site => {
+            if (!site) return false;
+            if (site === hostname) return true;
+            if (site.startsWith('*.')) {
+                const domain = site.slice(2);
+                return hostname === domain || hostname.endsWith('.' + domain);
+            }
+            return false;
+        });
+    }
 
     // -------------------------------------------------------------------------
     // 2. Initialization
@@ -139,6 +191,20 @@
             }
             #ps-badge:hover { background: rgba(0, 0, 0, 0.75) !important; color: #fff !important; }
             #ps-badge.ps-out { opacity: 0 !important; transform: translateY(4px) !important; pointer-events: none !important; }
+            #ps-settings { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2147483646; display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+            #ps-settings .ps-backdrop { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.35); }
+            #ps-settings .ps-modal { position: relative; background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 300px; max-width: 400px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); color: #222; font-size: 13px; }
+            #ps-settings h3 { margin: 0 0 14px 0; font-size: 15px; }
+            #ps-settings .ps-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+            #ps-settings .ps-row + .ps-row { border-top: 1px solid #eee; }
+            #ps-settings .ps-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+            #ps-settings .ps-row input[type="text"] { width: 100%; margin-top: 4px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; box-sizing: border-box; }
+            #ps-settings .ps-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+            #ps-settings .ps-buttons button { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+            #ps-settings .ps-btn-primary { background: #01696f; color: #fff; }
+            #ps-settings .ps-btn-primary:hover { background: #015558; }
+            #ps-settings .ps-btn-cancel { background: #e0e0e0; color: #333; }
+            #ps-settings .ps-btn-cancel:hover { background: #d0d0d0; }
         `;
         const css = CSS_RULES + badgeCss;
 
@@ -155,9 +221,25 @@
         if (document.getElementById('ps-badge')) return;
         const badge = document.createElement('div');
         badge.id = 'ps-badge';
+
+        const label = document.createElement('span');
+        badge.appendChild(label);
+
+        const gear = document.createElement('span');
+        gear.textContent = ' ⚙';
+        gear.style.opacity = '0.5';
+        gear.style.fontSize = '9px';
+        gear.style.marginLeft = '2px';
+        gear.title = 'Settings';
+        gear.addEventListener('click', e => {
+            e.stopPropagation();
+            createSettingsPanel();
+        });
+        badge.appendChild(gear);
+
         let allVisible = false;
 
-        badge.addEventListener('click', () => {
+        label.addEventListener('click', () => {
             allVisible = !allVisible;
             document.querySelectorAll('.ps-hidden, .ps-visible').forEach(el => {
                 el.className = allVisible ? 'ps-visible' : 'ps-hidden';
@@ -176,8 +258,9 @@
     function refreshBadge() {
         const badge = document.getElementById('ps-badge');
         if (!badge) return;
+        const label = badge.querySelector('span');
         const total = document.querySelectorAll('.ps-hidden, .ps-visible').length;
-        badge.textContent = total ? '🔒 ' + total : '🔒 0';
+        if (label) label.textContent = '🔒 ' + total;
         clearTimeout(window._psTimer);
         badge.classList.remove('ps-out');
         window._psTimer = setTimeout(() => badge.classList.add('ps-out'), 3000);
@@ -318,6 +401,49 @@
         });
     }
 
+    function isIPv6(text) {
+        let str = text.trim().replace(/^\[|\](?::\d{1,5})?$/g, '').split('%')[0].toLowerCase();
+        if (!str || str.length < 2 || str.length > 39 || !str.includes(':')) return false;
+
+        if (str.includes('.')) {
+            const lastColon = str.lastIndexOf(':');
+            if (lastColon < 0) return false;
+            const ipv4Part = str.slice(lastColon + 1);
+            if (!isIP(ipv4Part)) return false;
+            const prefix = str.slice(0, lastColon);
+            if (!prefix) return false;
+            const groups = prefix.split(':').filter(g => g !== '');
+            for (const g of groups) {
+                if (!/^[0-9a-f]{1,4}$/.test(g)) return false;
+            }
+            if ((prefix.match(/::/g) || []).length > 1) return false;
+            return true;
+        }
+
+        const colons = (str.match(/:/g) || []).length;
+        if (colons < 2 || colons > 7) return false;
+
+        const hasDC = str.includes('::');
+        if (hasDC) {
+            if ((str.match(/::/g) || []).length > 1) return false;
+        } else if (colons !== 7) {
+            return false;
+        }
+
+        if (str.startsWith(':') && !str.startsWith('::')) return false;
+        if (str.endsWith(':') && !str.endsWith('::')) return false;
+
+        const groups = str.split(':').filter(g => g !== '');
+        for (const g of groups) {
+            if (g.length > 4) return false;
+            for (let i = 0; i < g.length; i++) {
+                const code = g.charCodeAt(i);
+                if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 102))) return false;
+            }
+        }
+        return true;
+    }
+
     function isPhone(text) {
         const norm = toEnglishNumerals(text).trim();
         let digits = '';
@@ -399,11 +525,14 @@
     }
 
     function shouldMask(val) {
-        if (val.includes('@')) return isEmail(val);
-        if (isIP(val)) return true;
+        const s = getSettings();
+        if (val.includes('@')) return s.maskEmails && isEmail(val);
+        if (isIP(val)) return s.maskIPs;
+        if (val.includes(':') && isIPv6(val)) return s.maskIPs;
         if (isTime(val) || isDate(val)) return false;
 
         const normVal = toEnglishNumerals(val).trim();
+        if (!s.maskPhones) return false;
         if (normVal.includes('/') || (normVal.includes('.') && normVal.includes('-'))) return false;
 
         if (normVal.includes('.')) {
@@ -442,6 +571,8 @@
 
         const norm = toEnglishNumerals(text.replace(/\s+/g, ''));
         if (norm.includes('.') && norm.split('.').length >= 4) return true;
+
+        if (norm.includes(':') && /[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,}/.test(norm)) return true;
 
         let digitCount = 0;
         const phoneSeparators = new Set(['-', '.', '(', ')', ',', '،']);
@@ -583,13 +714,73 @@
     }
 
     // -------------------------------------------------------------------------
-    // 8. Entry Point
+    // 8. Settings Panel
+    // -------------------------------------------------------------------------
+
+    function createSettingsPanel() {
+        const existing = document.getElementById('ps-settings');
+        if (existing) existing.remove();
+
+        const cur = getSettings();
+
+        const panel = document.createElement('div');
+        panel.id = 'ps-settings';
+        panel.innerHTML = `
+            <div class="ps-backdrop"></div>
+            <div class="ps-modal">
+                <h3>🔒 Private Shield Settings</h3>
+                <div class="ps-row">
+                    <span>Mask email addresses</span>
+                    <input type="checkbox" id="ps-opt-emails" ${cur.maskEmails ? 'checked' : ''}>
+                </div>
+                <div class="ps-row">
+                    <span>Mask phone numbers</span>
+                    <input type="checkbox" id="ps-opt-phones" ${cur.maskPhones ? 'checked' : ''}>
+                </div>
+                <div class="ps-row">
+                    <span>Mask IP addresses</span>
+                    <input type="checkbox" id="ps-opt-ips" ${cur.maskIPs ? 'checked' : ''}>
+                </div>
+                <div class="ps-row" style="flex-wrap:wrap;">
+                    <span style="width:100%;">Whitelisted sites (comma-separated)</span>
+                    <input type="text" id="ps-opt-sites" value="${cur.whitelistedSites.replace(/"/g, '&quot;')}" placeholder="e.g. example.com, *.internal.com">
+                </div>
+                <div class="ps-buttons">
+                    <button class="ps-btn-primary" id="ps-save">Save & Reload</button>
+                    <button class="ps-btn-cancel" id="ps-cancel">Cancel</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(panel);
+
+        document.getElementById('ps-save').addEventListener('click', () => {
+            saveSettings({
+                maskEmails: document.getElementById('ps-opt-emails').checked,
+                maskPhones: document.getElementById('ps-opt-phones').checked,
+                maskIPs: document.getElementById('ps-opt-ips').checked,
+                whitelistedSites: document.getElementById('ps-opt-sites').value
+            });
+            panel.remove();
+            location.reload();
+        });
+
+        document.getElementById('ps-cancel').addEventListener('click', () => panel.remove());
+        panel.querySelector('.ps-backdrop').addEventListener('click', () => panel.remove());
+    }
+
+    // -------------------------------------------------------------------------
+    // 9. Entry Point
     // -------------------------------------------------------------------------
 
     function init() {
+        if (isSiteWhitelisted()) return;
         createBadge();
         scanRoot(document.body);
         setupObserver();
+        if (typeof GM_registerMenuCommand !== 'undefined') {
+            GM_registerMenuCommand('🔒 Private Shield Settings', createSettingsPanel);
+        }
     }
 
 })();
